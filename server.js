@@ -20,6 +20,7 @@ app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size }));
 
 const cleanName = (value) => String(value ?? '').trim().replace(/[<>]/g, '').slice(0, 18) || 'Joueur';
 const cleanCode = (value) => String(value ?? '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+const cleanClientKey = (value) => String(value ?? '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
 const objectPayload = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 const integer = (value, fallback) => Number.isInteger(Number(value)) ? Number(value) : fallback;
 const validStake = (value) => Math.min(MAX_STAKE, Math.max(MIN_STAKE, integer(value, MIN_STAKE)));
@@ -69,10 +70,10 @@ function rollFor(room, playerId, auto = false, abattage = false, opponentId = nu
   if (next >= 0) { room.turnIndex = next; scheduleTurn(room); } else finishNormal(room);
   return true;
 }
-function makeRoom(socket, name, stake) {
+function makeRoom(socket, name, stake, clientKey) {
   let code = roomCode(); while (rooms.has(code)) code = roomCode();
-  const room = { code, hostId: socket.id, stake: validStake(stake), phase: 'lobby', turnIndex: 0, players: [], winner: null, message: '', turnTimer: null, lastActivity: Date.now() };
-  room.players.push({ id: socket.id, name: cleanName(name), total: null, dice: null, connected: true, auto: false });
+  const room = { code, hostId: socket.id, stake: validStake(stake), phase: 'lobby', starterIndex: 0, turnIndex: 0, players: [], winner: null, message: '', turnTimer: null, lastActivity: Date.now() };
+  room.players.push({ id: socket.id, clientKey: cleanClientKey(clientKey), name: cleanName(name), total: null, dice: null, connected: true, auto: false });
   rooms.set(code, room); return room;
 }
 function getRoom(socket) { return rooms.get(socket.data.roomCode); }
@@ -88,7 +89,7 @@ io.on('connection', (socket) => {
   socket.on('create', (payload = {}, ack) => {
     payload = objectPayload(payload);
     if (!limited(socket, 'create') || socket.data.roomCode) return sendError(socket, 'Action impossible', ack);
-    const room = makeRoom(socket, payload.name, payload.stake); socket.join(room.code); socket.data.roomCode = room.code;
+    const room = makeRoom(socket, payload.name, payload.stake, payload.clientKey); socket.join(room.code); socket.data.roomCode = room.code;
     socket.emit('joined', { code: room.code, host: true }); emitState(room); if (typeof ack === 'function') ack({ ok: true });
   });
   socket.on('join', (payload = {}, ack) => {
@@ -98,8 +99,10 @@ io.on('connection', (socket) => {
     if (!room) return sendError(socket, 'Table introuvable', ack);
     if (room.phase !== 'lobby') return sendError(socket, 'Manche en cours', ack);
     if (room.players.length >= 5) return sendError(socket, 'Table complète', ack);
+    const clientKey = cleanClientKey(payload.clientKey);
+    if (clientKey && room.players.some((p) => p.clientKey === clientKey)) return sendError(socket, 'Ce joueur est déjà à cette table', ack);
     if (room.players.some((p) => p.name.toLowerCase() === cleanName(payload.name).toLowerCase())) return sendError(socket, 'Nom déjà pris', ack);
-    room.players.push({ id: socket.id, name: cleanName(payload.name), total: null, dice: null, connected: true, auto: false });
+    room.players.push({ id: socket.id, clientKey, name: cleanName(payload.name), total: null, dice: null, connected: true, auto: false });
     touch(room); socket.join(room.code); socket.data.roomCode = room.code; socket.emit('joined', { code: room.code, host: false }); emitState(room); if (typeof ack === 'function') ack({ ok: true });
   });
   socket.on('start', (_payload = {}, ack) => {
@@ -107,7 +110,7 @@ io.on('connection', (socket) => {
     if (room.hostId !== socket.id) return sendError(socket, 'Seul le créateur peut démarrer', ack);
     if (room.players.length < 2) return sendError(socket, 'Il faut 2 joueurs', ack);
     if (room.players.some((p) => !p.connected)) return sendError(socket, 'Un joueur est déconnecté', ack);
-    room.phase = 'playing'; room.turnIndex = 0; room.winner = null; room.message = ''; touch(room); scheduleTurn(room); emitState(room); if (typeof ack === 'function') ack({ ok: true });
+    room.phase = 'playing'; room.turnIndex = room.starterIndex; room.winner = null; room.message = ''; touch(room); scheduleTurn(room); emitState(room); if (typeof ack === 'function') ack({ ok: true });
   });
   socket.on('roll', (payload = {}, ack) => {
     payload = objectPayload(payload);
@@ -121,12 +124,13 @@ io.on('connection', (socket) => {
     if (!rollFor(room, socket.id, false, useAbattage, opponent?.id, abattageStake)) return sendError(socket, 'Lancer refusé', ack);
     touch(room); emitState(room); if (typeof ack === 'function') ack({ ok: true });
   });
-  socket.on('newRound', () => {
-    const room = getRoom(socket); if (!room || !limited(socket, 'newRound')) return;
-    if (room.phase !== 'finished' || room.hostId !== socket.id) return;
-    if (room.players.length < 2 || room.players.some((p) => !p.connected)) return sendError(socket, 'Tous les joueurs doivent être présents');
-    room.phase = 'lobby'; room.turnIndex = 0; room.winner = null; room.message = '';
-    room.players.forEach((p) => { p.total = null; p.dice = null; p.auto = false; }); touch(room); emitState(room);
+  socket.on('newRound', (_payload = {}, ack) => {
+    const room = getRoom(socket); if (!room || !limited(socket, 'newRound')) return sendError(socket, 'Action impossible', ack);
+    if (room.phase !== 'finished' || room.hostId !== socket.id) return sendError(socket, 'Seul l’hôte peut relancer', ack);
+    if (room.players.length < 2 || room.players.some((p) => !p.connected)) return sendError(socket, 'Tous les joueurs doivent être présents', ack);
+    room.starterIndex = (room.starterIndex + 1) % room.players.length;
+    room.phase = 'playing'; room.turnIndex = room.starterIndex; room.winner = null; room.message = 'Nouvelle manche';
+    room.players.forEach((p) => { p.total = null; p.dice = null; p.auto = false; }); touch(room); scheduleTurn(room); emitState(room); if (typeof ack === 'function') ack({ ok: true });
   });
   socket.on('disconnect', () => {
     const room = getRoom(socket); if (!room) return;

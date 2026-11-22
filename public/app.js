@@ -1,13 +1,14 @@
 const socket = io({ reconnection: true, reconnectionAttempts: 8, timeout: 8000 });
 const $ = (s) => document.querySelector(s); let me = null; let state = null; let connected = false;
+const clientKey = localStorage.getItem('dicePlayerKey') || (() => { const key = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`; localStorage.setItem('dicePlayerKey', key); return key; })();
 const toast = (message) => { const el = $('#toast'); el.textContent = message; el.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove('show'), 2400); };
 const setBusy = (busy) => document.querySelectorAll('button').forEach((b) => { if (!b.id.includes('help') && !b.id.includes('copy')) b.disabled = busy; });
 for (const button of document.querySelectorAll('[data-tab]')) button.addEventListener('click', () => { document.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('active')); button.classList.add('active'); document.querySelectorAll('.tab').forEach((tab) => tab.classList.add('hidden')); $('#' + button.dataset.tab).classList.remove('hidden'); });
-$('#create').onclick = () => { setBusy(true); socket.emit('create', { name: $('#createName').value, stake: $('#stake').value }); setTimeout(() => setBusy(false), 600); };
-$('#join').onclick = () => { setBusy(true); socket.emit('join', { name: $('#joinName').value, code: $('#roomCode').value }); setTimeout(() => setBusy(false), 600); };
+$('#create').onclick = () => { setBusy(true); socket.emit('create', { name: $('#createName').value, stake: $('#stake').value, clientKey }, (reply) => { if (!reply?.ok) toast(reply?.message || 'Création refusée'); setBusy(false); }); };
+$('#join').onclick = () => { setBusy(true); socket.emit('join', { name: $('#joinName').value, code: $('#roomCode').value, clientKey }, (reply) => { if (!reply?.ok) toast(reply?.message || 'Rejoindre refusé'); setBusy(false); }); };
 $('#start').onclick = () => { $('#start').disabled = true; socket.emit('start', {}, (reply) => { if (!reply?.ok) { $('#start').disabled = false; toast(reply?.message || 'Impossible de démarrer'); } }); setTimeout(() => { if (state?.phase === 'lobby') $('#start').disabled = false; }, 1200); };
 $('#roll').onclick = () => { if (!state || state.turn !== me || !connected) return; $('#roll').disabled = true; socket.emit('roll', { abattage: $('#abattage').checked, opponent: $('#opponent').value, abattageStake: $('#abattageStake').value }, (reply) => { if (!reply?.ok) { $('#roll').disabled = false; toast(reply?.message || 'Lancer refusé'); } }); if (navigator.vibrate) navigator.vibrate(35); setTimeout(() => { if (state?.phase === 'playing' && state.turn === me) $('#roll').disabled = false; }, 900); };
-$('#newRound').onclick = () => socket.emit('newRound');
+$('#newRound').onclick = () => { $('#newRound').disabled = true; socket.emit('newRound', {}, (reply) => { $('#newRound').disabled = false; if (!reply?.ok) toast(reply?.message || 'Impossible de relancer'); }); };
 $('#abattage').onchange = () => $('#abattageFields').classList.toggle('hidden', !$('#abattage').checked);
 $('#copy').onclick = async () => { try { await navigator.clipboard.writeText(`${location.origin}${location.pathname}?table=${state.code}`); toast('Lien copié'); } catch { toast(`Code : ${state.code}`); } };
 $('#help').onclick = () => toast('Lancez deux dés. Le meilleur total gagne.');
